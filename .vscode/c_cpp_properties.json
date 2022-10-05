@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include"
+            ],
+            "defines": [],
+            "compilerPath": "/sw/csi/gcc/9.2.0/el7.9_binary/bin/gcc",
+            "cStandard": "gnu17",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

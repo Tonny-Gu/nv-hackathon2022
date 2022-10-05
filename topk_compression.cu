@@ -556,6 +556,10 @@ __global__ void topk_compress(T *input, unsigned int *indices, T *values,
       }
     }
   }
+  __syncthreads();
+  for (unsigned int i = (unsigned int)index_p + tid; i < num_result; i += stride) {
+    values[i] = mean;
+  }
 }
 
 // Compress to (indices,value) pair - Called by CUDA_topk_compress

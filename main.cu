@@ -10,9 +10,33 @@
 #include <fstream>
 #include <unistd.h>
 #include <getopt.h>
+#include <mpi.h>
+#include <nccl.h>
 extern char *optarg;
 
 #include"topk_compression.h"
+
+#define N_GPU_PER_NODE 4
+
+#define CUDA_TIME_IT_BEGIN(section_name) \
+    cudaEvent_t _start_##section_name; \
+    cudaEvent_t _stop_##section_name; \
+    cudaEventCreate(&_start_##section_name); \
+    cudaEventCreate(&_stop_##section_name); \
+    cudaEventRecord(_start_##section_name, stream);
+
+#define CUDA_TIME_IT_END(section_name) \
+    float _time_##section_name; \
+    cudaEventRecord(_stop_##section_name, stream); \
+    cudaEventSynchronize(_stop_##section_name); \
+    cudaEventElapsedTime(&_time_##section_name, _start_##section_name, _stop_##section_name); \
+    std::cout << "[Rank " << mrank << "] " << #section_name << " Elapsed time = " << _time_##section_name << std::endl;
+
+#define MPI_TIME_IT_BEGIN(section_name) \
+    double _start_mpi_##section_name = MPI_Wtime();
+
+#define MPI_TIME_IT_END(section_name) \
+    std::cout << "[Rank " << mrank << "] " << #section_name << " Elapsed time = " << MPI_Wtime() - _start_mpi_##section_name << std::endl;
 
 using namespace std;
 
@@ -29,6 +53,18 @@ static struct option long_options[] = {
 };
 
 int main(int argc, char *argv[]) {
+    MPI_Init(NULL, NULL);
+    int msize, mrank;
+    MPI_Comm_size(MPI_COMM_WORLD, &msize);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mrank);
+    cudaSetDevice(mrank % N_GPU_PER_NODE);
+
+    ncclUniqueId nccl_id;
+    ncclComm_t nccl_comm;
+    ncclGetUniqueId(&nccl_id);
+    MPI_Bcast(&nccl_id, sizeof(ncclUniqueId), MPI_BYTE, 0, MPI_COMM_WORLD);
+    ncclCommInitRank(&nccl_comm, msize, nccl_id, mrank);
+
     float *host_input_data;
     int num_elems, num_result;
     std::cout.precision(6);
@@ -53,14 +89,16 @@ int main(int argc, char *argv[]) {
         // Initialize Input - Normal Distribution Generation
         float input_mean = 0;
         float input_std = 1.0;
-        unsigned seed = chrono::system_clock::now().time_since_epoch().count();
+        // unsigned seed = chrono::system_clock::now().time_since_epoch().count();
+        unsigned seed = 1024;
         default_random_engine generator(seed);
         normal_distribution<float> distribution(input_mean, input_std);
         std::cout<<"Normal Distribution"<<endl<<"Mean = "<<input_mean<<"; Std = "<<input_std<<"; Size = "<<num_elems<<endl;
         host_input_data = new  float [num_elems];
         for (int i = 0; i < num_elems; i++) {
-            host_input_data[i] =distribution(generator);
+            host_input_data[i] = distribution(generator);
         }
+        std::cout << "Data Generated." << std::endl;
     }
 
     // Resnet Distribution
@@ -106,12 +144,70 @@ int main(int argc, char *argv[]) {
     cudaMalloc(&dev_output_data, sizeof(float)*2*num_result);
     dev_feedback_data = nullptr;
     cudaMalloc(&dev_utility_buf, sizeof(float)*10);
-    cudaMemcpy(dev_input_data, host_input_data, sizeof(float)*num_elems, cudaMemcpyHostToDevice); 
-
 
     /* Cuda Stream */
     cudaStream_t stream;
     cudaStreamCreate(&stream);
+    
+    auto local_num_elems = num_elems / msize;
+    assert(num_elems % msize == 0);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_TIME_IT_BEGIN(Scatter);
+
+    #if defined(MEMCPY_NCCL)
+    MPI_TIME_IT_BEGIN(MemCopyH2D);
+    if (mrank == 0) {
+        cudaMemcpy(dev_input_data, host_input_data, sizeof(float)*num_elems, cudaMemcpyHostToDevice);
+    }
+    cudaDeviceSynchronize();
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_TIME_IT_END(MemCopyH2D);
+
+    MPI_TIME_IT_BEGIN(PureCommH2D);
+    ncclGroupStart();
+    if (mrank == 0) {
+        for (int r = 1; r < msize; r++) {
+            ncclSend(&dev_input_data[local_num_elems * r], local_num_elems, ncclFloat32, r, nccl_comm, stream);
+        }
+    } else {
+        ncclRecv(dev_input_data, local_num_elems, ncclFloat32, 0, nccl_comm, stream);
+    }
+    ncclGroupEnd();
+    cudaDeviceSynchronize();
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_TIME_IT_END(PureCommH2D);
+
+    #elif defined(MEMCPY_NCCL_H2D)
+    
+    ncclGroupStart();
+    if (mrank == 0) {
+        for (int r = 1; r < msize; r++) {
+            ncclSend(&host_input_data[local_num_elems * r], local_num_elems, ncclFloat32, r, nccl_comm, stream);
+        }
+    } else {
+        ncclRecv(dev_input_data, local_num_elems, ncclFloat32, 0, nccl_comm, stream);
+    }
+    ncclGroupEnd();
+    
+    if (mrank == 0) {
+        cudaMemcpy(dev_input_data, host_input_data, sizeof(float)*local_num_elems, cudaMemcpyHostToDevice);
+    }
+    
+    #elif defined(MEMCPY_MPI_GDR)
+    MPI_Scatter((const void*)host_input_data, local_num_elems, MPI_FLOAT, dev_input_data, local_num_elems, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+    #elif defined(MEMCPY_MPI)
+    MPI_Scatter((const void*)host_input_data, local_num_elems, MPI_FLOAT, host_input_data, local_num_elems, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    cudaMemcpy(dev_input_data, host_input_data, sizeof(float)*local_num_elems, cudaMemcpyHostToDevice);
+    
+    #else
+    cudaMemcpy(dev_input_data, host_input_data, sizeof(float)*num_elems, cudaMemcpyHostToDevice);
+    #endif
+
+    cudaDeviceSynchronize();
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_TIME_IT_END(Scatter);
 
     // /* Thrust stats */
     // thrust::cuda::par.on(stream);
@@ -132,7 +228,7 @@ int main(int argc, char *argv[]) {
     // cudaStreamSynchronize(stream);
     // cout<<"Thrust Elapsed time = "<<elapsed_time_thrust<<endl;
     // /* Kernel Compression*/
-    qmpi::common::gpu::CUDA_topk_compress<float>((unsigned char *)dev_input_data,(unsigned char *)dev_output_data,(unsigned char *)dev_utility_buf,(unsigned char *)dev_feedback_data,num_elems, num_result,stream);
+    qmpi::common::gpu::CUDA_topk_compress<float>((unsigned char *)dev_input_data,(unsigned char *)dev_output_data,(unsigned char *)dev_utility_buf,(unsigned char *)dev_feedback_data, local_num_elems, num_result, stream);
     cudaStreamSynchronize(stream);
 
 
@@ -150,6 +246,8 @@ int main(int argc, char *argv[]) {
         //     cout<<"index = "<<i<<"; value = "<<static_cast<float>(host_decompressed_data[i])<<endl;
         // }
     }
+
+    MPI_Finalize();
 
     return 0;
 }
