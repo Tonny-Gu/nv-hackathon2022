@@ -530,7 +530,7 @@ void topk_find_threshold_sample_sort(T *input, unsigned char *utility_buf,
 template<typename T, bool EF>
 __global__ void topk_compress(T *input, unsigned int *indices, T *values,
                               unsigned char *utility_buf, T *feedback,
-                              int num_elem, int num_result) {
+                              int num_elem, int num_result, int offset) {
   unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
   unsigned int stride = gridDim.x * blockDim.x;
   T* stats = (T *) utility_buf;
@@ -547,7 +547,7 @@ __global__ void topk_compress(T *input, unsigned int *indices, T *values,
     if (le(threshold, abs((value-mean)/std))) {
       idx = atomicAdd(index_p, 1);  // atomicAdd is thread safe and the return is the old value
       if (idx < num_result) { // The threshold is estimated so we need to gurantee the compressed number is smaller than num_result
-        indices[idx] = i;
+        indices[idx] = i + offset;
         values[idx] = value;
         if (EF)
           feedback[i] = float2type<T>(0.0);
@@ -606,7 +606,7 @@ template<typename T>
 void CUDA_topk_compress(unsigned char *input_data, unsigned char *output_data,
                         unsigned char *utility_buf,
                         unsigned char *feedback_data, int num_elems,
-                        int num_result, cudaStream_t stream) {
+                        int num_result, int offset, cudaStream_t stream) {
   // Variables 
   T *input = (T *) input_data;
   unsigned int *indices = (unsigned int *) output_data;  // indices is the start address of index
@@ -668,7 +668,7 @@ void CUDA_topk_compress(unsigned char *input_data, unsigned char *output_data,
   cudaEventCreate(&stop_kernel);
   cudaEventRecord(start_kernel, stream);
   topk_compress<T, false><<<num_blocks, num_threads, 0, stream>>>(
-        input, indices, output, utility_buf, nullptr, num_elems, num_result);
+        input, indices, output, utility_buf, nullptr, num_elems, num_result, offset);
   // topk_compress_pair<T, false><<<num_blocks, num_threads, 0, stream>>>(
       // input, (unsigned char *)indices, utility_buf, nullptr, num_elems, num_result);
   cudaEventRecord(stop_kernel, stream);
@@ -781,14 +781,14 @@ template void CUDA_topk_compress<float>(unsigned char *input_data,
                                         unsigned char *output_data,
                                         unsigned char *utility_buf,
                                         unsigned char *feedback_data,
-                                        int num_elems, int num_result,
+                                        int num_elems, int num_result, int,
                                         cudaStream_t stream);
 
 template void CUDA_topk_compress<Half>(unsigned char *input_data,
                                        unsigned char *output_data,
                                        unsigned char *utility_buf,
                                        unsigned char *feedback_data,
-                                       int num_elems, int num_result,
+                                       int num_elems, int num_result, int,
                                        cudaStream_t stream);
 
 template void CUDA_topk_decompress<float, true>(unsigned char *input_data,

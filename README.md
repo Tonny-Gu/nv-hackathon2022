@@ -24,14 +24,22 @@ module load openmpi/4.0.3-cuda11.2.2 gcc/9.2.0 dl
 module load nccl/2.10.3.1
 
 # Compile & Run
-nvcc -O3 -ccbin mpicxx -g -arch=sm_80 main.cu -o main.nccl.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_NCCL &
-nvcc -O3 -ccbin mpicxx -g -arch=sm_80 main.cu -o main.mpi.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_MPI &
-nvcc -O3 -ccbin mpicxx -g -arch=sm_80 main.cu -o main.mgdr.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_MPI_GDR &
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nccl.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_NCCL &
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.mpi.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_MPI &
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.mgdr.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_MPI_GDR &
 
 
 srun ./main.nccl.bin --normal --num_elems=1000000 --num_result=1000
 ```
 
+```bash
+module load nvidia-sdk/nvhpc/22.7 gcc/9.2.0
+export OMPI_MPICC=gcc
+export OMPI_MPICXX=g++
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nv.nccl.bin -lmpi -lnccl -DMEMCPY_NCCL &
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nv.mpi.bin -lmpi -lnccl -DMEMCPY_MPI &
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nv.mgdr.bin -lmpi -lnccl -DMEMCPY_MPI_GDR &
+```
 ## Performance
 
 ```

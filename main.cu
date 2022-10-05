@@ -12,6 +12,9 @@
 #include <getopt.h>
 #include <mpi.h>
 #include <nccl.h>
+#include <thrust/sort.h>
+#include <thrust/device_ptr.h>
+#include <thrust/reduce.h>
 extern char *optarg;
 
 #include"topk_compression.h"
@@ -228,8 +231,89 @@ int main(int argc, char *argv[]) {
     // cudaStreamSynchronize(stream);
     // cout<<"Thrust Elapsed time = "<<elapsed_time_thrust<<endl;
     // /* Kernel Compression*/
-    qmpi::common::gpu::CUDA_topk_compress<float>((unsigned char *)dev_input_data,(unsigned char *)dev_output_data,(unsigned char *)dev_utility_buf,(unsigned char *)dev_feedback_data, local_num_elems, num_result, stream);
+    qmpi::common::gpu::CUDA_topk_compress<float>(
+        (unsigned char *)dev_input_data,
+        (unsigned char *)dev_output_data,
+        (unsigned char *)dev_utility_buf,
+        (unsigned char *)dev_feedback_data,
+        local_num_elems,
+        num_result,
+        mrank * local_num_elems,
+        stream);
+        
     cudaStreamSynchronize(stream);
+
+    float *dev_gather_value, *host_gather_value;
+    unsigned int *dev_gather_index, *host_gather_index;
+
+    cudaMalloc(&dev_gather_value, sizeof(float) * num_result * msize);
+    cudaMalloc(&dev_gather_index, sizeof(unsigned int) * num_result * msize);
+    cudaMallocHost(&host_gather_value, sizeof(float) * num_result * msize);
+    cudaMallocHost(&host_gather_index, sizeof(unsigned int) * num_result * msize);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_TIME_IT_BEGIN(Gather);
+
+    #if defined(MEMCPY_NCCL)
+    ncclGroupStart();
+    if (mrank == 0) {
+        for (int r = 0; r < msize; r++) {
+            ncclRecv(&dev_gather_index[num_result * r], num_result, ncclUint32, r, nccl_comm, stream);
+        }
+    } 
+    ncclSend(&dev_output_data[0], num_result, ncclUint32, 0, nccl_comm, stream);
+    ncclGroupEnd();
+    
+    ncclGroupStart();
+    if (mrank == 0) {
+        for (int r = 0; r < msize; r++) {
+            ncclRecv(&dev_gather_value[num_result * r], num_result, ncclFloat32, r, nccl_comm, stream);
+        }
+    } 
+    ncclSend(&dev_output_data[num_result], num_result, ncclFloat32, 0, nccl_comm, stream);
+    ncclGroupEnd();
+    
+    #elif defined(MEMCPY_MPI_GDR) || defined(MEMCPY_MPI)
+    MPI_Gather((const void*)&dev_output_data[0], num_result, MPI_UINT32_T, dev_gather_index, num_result, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Gather((const void*)&dev_output_data[num_result], num_result, MPI_FLOAT, dev_gather_value, num_result, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    
+    #else
+    cudaMemcpy(dev_gather_index, &dev_output_data[0], sizeof(float)*num_result, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(dev_gather_value, &dev_output_data[num_result], sizeof(float)*num_result, cudaMemcpyDeviceToDevice);
+    #endif
+
+    cudaDeviceSynchronize();
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_TIME_IT_END(Gather);
+
+    MPI_TIME_IT_BEGIN(Merge);
+    thrust::device_ptr<float> dev_gather_value_ptr(dev_gather_value);
+    thrust::device_ptr<unsigned int> dev_gather_index_ptr(dev_gather_index);
+
+    if (mrank == 0) {
+        float mean = thrust::reduce(dev_gather_value_ptr, dev_gather_value_ptr + num_result * msize) / num_result;
+        thrust::sort_by_key(dev_gather_value_ptr, dev_gather_value_ptr + num_result * msize, dev_gather_index_ptr,
+        [=] __host__ __device__ (const float& a, const float& b) {
+            float da = abs(a - mean);
+            float db = abs(b - mean);
+            return da > db;
+        });
+    }
+    
+    cudaDeviceSynchronize();
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_TIME_IT_END(Merge);
+
+    #ifdef SHOW_RESULT
+    if (mrank == 0) {
+        cudaMemcpy(host_gather_value, dev_gather_value, sizeof(float) * num_result, cudaMemcpyDeviceToHost);
+        cudaMemcpy(host_gather_index, dev_gather_index, sizeof(unsigned int) * num_result, cudaMemcpyDeviceToHost);
+        for (int i = 0; i < num_result; ++i) {
+            printf("Top%d: %f @ %u\n", i, host_gather_value[i], host_gather_index[i]);
+        }
+    }
+    #endif
+
 
 
     // /* Decompression */
