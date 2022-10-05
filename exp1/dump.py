@@ -21,7 +21,7 @@ for k, v in results.items():
                 m = match[0]
                 if "time" in m[1]:
                     metric = m[1].strip()
-                    value = m[2].strip()
+                    value = float(m[2].strip())
                     v.update({metric: value})
 
 with open("result.csv", "w") as f:
