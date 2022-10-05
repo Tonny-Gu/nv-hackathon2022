@@ -623,7 +623,7 @@ void CUDA_topk_compress(unsigned char *input_data, unsigned char *output_data,
   cudaEventCreate(&start_kernel);
   cudaEventCreate(&stop_kernel);
   cudaEventRecord(start_kernel, stream);
-  topk_find_threshold_double_expo(input, utility_buf, num_elems, num_result, stream); // utility_buf[0] = threshold, utility_buf[1]=0, utility_buf[2]=mean, utility_buf[3]=std;
+  topk_find_threshold(input, utility_buf, num_elems, num_result, stream); // utility_buf[0] = threshold, utility_buf[1]=0, utility_buf[2]=mean, utility_buf[3]=std;
   cudaEventRecord(stop_kernel, stream);
   cudaEventSynchronize(stop_kernel);
   cudaEventElapsedTime(&elapsed_time_kernel, start_kernel, stop_kernel);
