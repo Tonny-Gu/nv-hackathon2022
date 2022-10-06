@@ -12,6 +12,7 @@ The original author claims that he had carefully optimized one kernel (`find_sta
 
 ```bash
 nvcc -o topk -arch=sm_75 --std=c++17 main.cu # replace sm_75 with yours
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 main.cu -o main.base.bin
 ./topk --normal --num_elems=1000000 --num_result=1000
 ```
 
@@ -28,7 +29,6 @@ nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nccl.bin
 nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.mpi.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_MPI &
 nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.mgdr.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_MPI_GDR &
 
-
 srun ./main.nccl.bin --normal --num_elems=1000000 --num_result=1000
 ```
 
@@ -40,6 +40,12 @@ nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nv.nccl.
 nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nv.mpi.bin -lmpi -lnccl -DMEMCPY_MPI &
 nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.nv.mgdr.bin -lmpi -lnccl -DMEMCPY_MPI_GDR &
 ```
+
+```bash
+nvcc -O3 -ccbin mpicxx -g -arch=sm_80 --extended-lambda main.cu -o main.opt.mpi.bin -I/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/include -L/sw/csgv/dl/apps/nccl/2.10.3.1_cuda11.2.2/lib -lmpi -lnccl -DMEMCPY_MPI -DUSE_OPT_FILTER
+
+```
+
 ## Performance
 
 ```

@@ -178,11 +178,14 @@ void __global__ find_normal_quantile(T* stats, int num_elems, int num_result) {
   // printf("CPU float :Sum = %f; Square Sum = %f\n", stats[0], stats[1]);
   T mean = div_int(stats[0], num_elems);
   T std = div_int(stats[1], num_elems);
+  printf("mean %f, std %f\n", (float)mean, (float)std);
   memset(stats, 0, 4 * sizeof(float));
-  std = sqrt(sub(std, mul(mean, mean)));
+  float tmp = (float)(std - mean * mean);
+  printf("tmp %f\n", (float)tmp);
+  std = sqrt(tmp);
   float quantile = 1.0 - 0.5*(num_result * 1.0 / num_elems);
   T probit = float2type<T>(inv_cdf(quantile)); 
-  // printf("Probit %f, quantile %f, mean %f, std %f\n", probit, quantile, mean, std);
+  printf("Probit %f, quantile %f, mean %f, std %f\n", (float)probit, (float)quantile, (float)mean, (float)std);
   stats[0] = probit;
   stats[1] = float2type<T>(0.0);
   stats[2] = mean;
@@ -537,15 +540,20 @@ __global__ void topk_compress(T *input, unsigned int *indices, T *values,
   T threshold = stats[0];
   T mean = stats[2];
   T std =  stats[3];
+  printf("t m s %f %f %f\n", (float)threshold, (float)mean, (float)std);
   unsigned int *index_p = (unsigned int *) (utility_buf + sizeof(float)); //stats[1], initialzed in find_normal_quantile
   unsigned int idx = 0;
   T value;
   for (unsigned int i = tid; i < num_elem; i += stride) {
     value = input[i];
+    printf("t:%d b:%d read %f@%d, idx:%d, th:%f mean:%f std:%f abs:%f\n",
+      tid, blockIdx.x, (float)value, i + offset, 0,
+      (float)threshold, (float)mean, (float)std, (float)abs((value-mean)/std));
     if (EF)
       feedback[i] = value;
     if (le(threshold, abs((value-mean)/std))) {
-      idx = atomicAdd(index_p, 1);  // atomicAdd is thread safe and the return is the old value
+      // idx = atomicAdd(index_p, 1);  // atomicAdd is thread safe and the return is the old value
+      idx = (*index_p)++;
       if (idx < num_result) { // The threshold is estimated so we need to gurantee the compressed number is smaller than num_result
         indices[idx] = i + offset;
         values[idx] = value;
@@ -556,9 +564,95 @@ __global__ void topk_compress(T *input, unsigned int *indices, T *values,
       }
     }
   }
-  __syncthreads();
+}
+
+__global__ void topk_fill(float *values, float *utility_buf, int num_result) {
+  unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
+  unsigned int stride = gridDim.x * blockDim.x;
+  unsigned int *index_p = (unsigned int *) (utility_buf + sizeof(float));
+  float mean = utility_buf[2];
   for (unsigned int i = (unsigned int)index_p + tid; i < num_result; i += stride) {
     values[i] = mean;
+  }
+}
+
+__global__ void topk_compress_opt_phase1(float *input, unsigned int *block_indices, float *block_values,
+                              unsigned int *counts,
+                              float *utility_buf,
+                              int num_elem, int num_result, int offset) {
+  unsigned int *local_indices = &block_indices[num_result * blockIdx.x];
+  float *local_values = &block_values[num_result * blockIdx.x];
+
+  unsigned int tid = threadIdx.x;
+  unsigned int stride = blockDim.x;
+  float threshold = utility_buf[0];
+  float mean = utility_buf[2];
+  float std =  utility_buf[3];
+  // unsigned int *index_p = (unsigned int *) (utility_buf + sizeof(float)); //stats[1], initialzed in find_normal_quantile
+  float value;
+  unsigned int chunk_size = num_elem / gridDim.x + (num_elem % gridDim.x != 0 ? 1 : 0);
+  unsigned int start_offset = blockIdx.x * chunk_size;
+  unsigned int end_offset = (blockIdx.x + 1) * chunk_size;
+  end_offset = end_offset > num_elem ? num_elem : end_offset;
+  __shared__ unsigned int local_idx;
+  if (tid == 0) {
+    local_idx = 0;
+  }
+  __syncthreads();
+  for (unsigned int i = tid + start_offset; i < end_offset; i += stride) {
+    value = input[i];
+    printf("t:%d b:%d read %f@%d, idx:%d, th:%f mean:%f std:%f abs:%f\n",
+      tid, blockIdx.x, (float)value, i + offset, local_idx,
+      (float)threshold, (float)mean, (float)std, (float)abs((value-mean)/std));
+    if (le(threshold, abs((value-mean)/std))) {
+      unsigned int idx = atomicAdd(&local_idx, 1);
+      if (idx < num_result) {
+        local_indices[idx] = i + offset;
+        local_values[idx] = value;
+        printf("t:%d b:%d put %f@%d in idx%d @%x\n", tid, blockIdx.x, (float)value, i + offset, idx, &local_indices[idx]);
+      } else {
+        break;
+      }
+    }
+  }
+  __syncthreads();
+  if (tid == 0) {
+    counts[blockIdx.x] = local_idx;
+  }
+}
+
+__global__ void topk_compress_opt_phase2(unsigned int *block_indices, float *block_values,
+                              unsigned int *global_indices, float *global_values, unsigned int *counts,
+                              float *utility_buf,
+                              int num_result) {
+  unsigned int *local_indices = &block_indices[num_result * blockIdx.x];
+  float *local_values = &block_values[num_result * blockIdx.x];
+
+  unsigned int tid = threadIdx.x;
+  unsigned int stride = blockDim.x;
+  __shared__ unsigned int start_offset;
+  __shared__ unsigned int end_offset;
+  __shared__ unsigned int len;
+  if (tid == 0) {
+    start_offset = 0;
+    for (int i = 0; i < blockIdx.x; ++ i) {
+      start_offset += counts[i];
+    }
+    end_offset = start_offset + counts[blockIdx.x];
+    end_offset = end_offset > num_result ? num_result : end_offset;
+    len = end_offset - start_offset;
+  }
+  __syncthreads();
+  for (unsigned int i = tid; i < len; i += stride) {
+    global_indices[start_offset + i] = local_indices[i];
+    global_values[start_offset + i] = local_values[i];
+  }
+  if (blockIdx.x == gridDim.x - 1 && end_offset < num_result) {
+    float mean = utility_buf[2];
+    unsigned int pad_size = num_result - end_offset;
+    for (int i = 0; i < pad_size; i += stride) {
+      global_values[end_offset + i] = mean;
+    }
   }
 }
 
@@ -671,11 +765,32 @@ void CUDA_topk_compress(unsigned char *input_data, unsigned char *output_data,
         input, indices, output, utility_buf, nullptr, num_elems, num_result, offset);
   // topk_compress_pair<T, false><<<num_blocks, num_threads, 0, stream>>>(
       // input, (unsigned char *)indices, utility_buf, nullptr, num_elems, num_result);
+  topk_fill<<<num_blocks, num_threads, 0, stream>>>((float*)output, (float*)utility_buf, num_result);
   cudaEventRecord(stop_kernel, stream);
   cudaEventSynchronize(stop_kernel);
   cudaEventElapsedTime(&elapsed_time_kernel, start_kernel, stop_kernel);
   std::cout<<"Compression Elapsed time = "<<elapsed_time_kernel<<std::endl;
   cudaStreamSynchronize(stream); 
+
+  #ifdef USE_OPT_FILTER
+
+  int mrank = 0; // dummy
+
+  float *dev_block_values;
+  unsigned int *dev_block_indices;
+  unsigned int *dev_counts;
+  cudaMalloc(&dev_block_values, sizeof(float) * num_result * num_blocks);
+  cudaMalloc(&dev_block_indices, sizeof(float) * num_result * num_blocks);
+  cudaMalloc(&dev_counts, sizeof(float) * num_blocks);
+
+  CUDA_TIME_IT_BEGIN(FilterOpt);
+  topk_compress_opt_phase1<<<num_blocks, num_threads, 0, stream>>>((float*)input, dev_block_indices, dev_block_values, dev_counts, (float*)utility_buf, num_elems, num_result, offset);
+  topk_compress_opt_phase2<<<num_blocks, num_threads, 0, stream>>>(dev_block_indices, dev_block_values, indices, (float*)output, dev_counts, (float*)utility_buf, num_result);
+  CUDA_TIME_IT_END(FilterOpt);
+
+  cudaStreamSynchronize(stream);
+
+  #endif
 
   }
   CUDA_CHECK(cudaGetLastError());

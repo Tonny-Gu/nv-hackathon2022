@@ -1,0 +1,6 @@
+N,n,lib,ne,nr,logname,Kernel Elapsed time,Compression Elapsed time
+1,1,base,100000,1000,exp1_base_1_1_E5.log,0.049152,0.008192
+1,1,base,1000000,10000,exp1_base_1_1_E6.log,0.055296,0.031744
+1,1,base,10000000,100000,exp1_base_1_1_E7.log,0.121856,0.252928
+1,1,base,100000000,1000000,exp1_base_1_1_E8.log,0.886784,2.29478
+1,1,base,1000000000,10000000,exp1_base_1_1_E9.log,7.18336,15.5597
